@@ -1,6 +1,11 @@
 import collections
 import random
 from bio_structs import *
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 class bio_seq():
     def __init__(self, sequence="ATGC", seq_type="DNA", label="No label"):
@@ -52,7 +57,7 @@ class bio_seq():
         if sequence == None:
             sequence = self.sequence
         lower_sequence = sequence.lower()
-        return round(((lower_sequence.count("c") + lower_sequence.count("g"))/len(lower_sequence)) * 100)
+        return round(((lower_sequence.count("c") + lower_sequence.count("g")) / len(lower_sequence)) * 100)
 
     def gc_content_subsec(self, k=10):
         """Calculates the GC content using a sliding window approach across a sequence. Returns a list of GC contents for windows of size k."""
@@ -181,3 +186,17 @@ class bio_seq():
                 freq_kmers.append(kmer)
 
         return freq_kmers
+
+    def fold_protein_structure(self, sequence: str) -> str:
+        """Gets the protein structure of a given sequence using the ESMAtlas API and returns PDB text"""
+        url = "https://api.esmatlas.com/foldSequence/v1/pdb/"
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        try:
+            response = requests.post(url, headers=headers, data=sequence, verify=False)
+            response.raise_for_status()
+            return response.text
+
+        except Exception as er:
+            raise er

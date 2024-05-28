@@ -1,6 +1,6 @@
 from utilities import *
 from bio_seq import bio_seq
-from time import perf_counter
+import os
 
 def main():
     # Step 1: Retrieving the dna sequence
@@ -51,13 +51,31 @@ def main():
     # Step 9: Reading Frames
     print("\nStep 9: Reading frames for amino acids:")
     for aa_frames in dna_sequence.generate_amino_acid_reading_frames():
-        print(colorize(aa_frames))
+        print(aa_frames)
 
     # Step 10: Proteins
     print("\nStep 10: Proteins from DNA sequence:")
     proteins = dna_sequence.proteins_from_dna_seq()
-    for protein in proteins:
-        print(f"Protein: {protein}")
+
+    if proteins:
+        predicted_prot_structs = []
+        for protein in proteins:
+            print(f"Protein - {protein}")
+            try:
+                print("Predicting protein structure (using ESMFold API)...")
+                predicted_prot_struct = dna_sequence.fold_protein_structure(protein)
+                predicted_prot_structs.append(predicted_prot_struct)
+                print(f"Predicted protein structure - Successful\n")
+            except Exception as er:
+                print(f"Predicted protein structure - Failed")
+                print(f"Error: {er.args}\n")
+
+        for i in range(len(predicted_prot_structs)):
+            write_pdb_file(f"predicted_protein_struct_{i}.pdb", predicted_prot_structs[i])
+
+        print("We have saved all predicted protein structures to the current working directory.\n")
+    else:
+        print("No proteins found.\n")
 
     # Step 11: Hamming distance
     hamming_sequence = input(f"Step 11 - Please enter a sequence of length {len(dna_sequence.sequence)}, "
