@@ -1,24 +1,77 @@
+import os
+import csv
+import gzip
+import argparse
+import numpy as np
 from Bio.PDB import PDBParser, Polypeptide, Structure
 from Bio.PDB.vectors import calc_dihedral, Vector
 from scipy.spatial.transform import Rotation
-import numpy as np
-import argparse
-import os
 
-def load_pdb(pdb_file: str) -> Structure:
-    """
-    Load a PDB file and return the structure.
+# Constants
+DEFAULT_NEIGHBOR_COUNT = 16
+DEFAULT_OUTPUT_DIR = "."
+CHAIN_LIST_FILENAME = 'chain_list.txt'
 
-    Args:
-        pdb_file (str): Path to the PDB file.
+# File handling functions
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Featurize protein structures from PDB files listed in a CSV.")
+    parser.add_argument("csv_file", type=str, help="Path to the CSV file containing protein information")
+    parser.add_argument("pdb_directory", type=str, help="Path to the directory containing PDB files")
+    parser.add_argument("--neighbors", type=int, default=DEFAULT_NEIGHBOR_COUNT, help="Number of neighbors to consider")
+    parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_DIR, help="Output directory")
+    return parser.parse_args()
 
-    Returns:
-        Structure: Parsed PDB structure.
-    """
+def load_pdb(pdb_file: str) -> Structure.Structure:
     parser = PDBParser(QUIET=True)
-    return parser.get_structure('protein', pdb_file)
+    if pdb_file.endswith('.gz'):
+        with gzip.open(pdb_file, 'rt') as f:
+            return parser.get_structure('protein', f)
+    else:
+        return parser.get_structure('protein', pdb_file)
 
-def get_residue_labels(structure: Structure, chain_id: str) -> np.ndarray:
+def read_protein_csv(csv_file: str) -> list:
+    protein_info = []
+    with open(csv_file, 'r') as f:
+        csv_reader = csv.reader(f)
+        next(csv_reader)  # Skip header
+        for row in csv_reader:
+            protein, filename, chain = row
+            protein_info.append((protein, filename, chain))
+    return protein_info
+
+def save_features(features: tuple, output_dir: str, filename: str):
+    residue_labels, translations, rotations, torsional_angles = features
+    output_file = os.path.join(output_dir, filename)
+    np.savez(output_file,
+             residue_labels=residue_labels,
+             translations=translations,
+             rotations=rotations,
+             torsional_angles=torsional_angles)
+
+def save_chain_list(chain_list: list, output_dir: str):
+    output_file = os.path.join(output_dir, CHAIN_LIST_FILENAME)
+    with open(output_file, 'w') as f:
+        for pdb_id, chain_id in chain_list:
+            f.write(f"{pdb_id}{chain_id}\n")
+    print(f"Chain list saved to {output_file}")
+
+# Utility functions
+def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+    """Normalize vectors to unit length."""
+    return vectors / np.linalg.norm(vectors, axis=-1, keepdims=True)
+
+def dot_product(array_a: np.ndarray, array_b: np.ndarray, keepdims: bool = True) -> np.ndarray:
+    """Compute dot product of two arrays."""
+    return np.sum(array_a * array_b, axis=-1, keepdims=keepdims)
+
+def project_vectors(array_a: np.ndarray, array_b: np.ndarray, keepdims: bool = True) -> np.ndarray:
+    """Project array_a onto array_b."""
+    a_dot_b = dot_product(array_a, array_b, keepdims=keepdims)
+    b_dot_b = dot_product(array_b, array_b, keepdims=keepdims)
+    return a_dot_b / b_dot_b
+
+# Feature calculation functions
+def get_residue_labels(structure: Structure.Structure, chain_id: str) -> np.ndarray:
     """
     Get residue labels for a specific chain in the structure.
 
@@ -37,20 +90,6 @@ def get_residue_labels(structure: Structure, chain_id: str) -> np.ndarray:
                     if Polypeptide.is_aa(residue, standard=True):
                         residue_labels.append(Polypeptide.three_to_index(residue.resname))
     return np.array(residue_labels)
-
-def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
-    """Normalize vectors to unit length."""
-    return vectors / np.linalg.norm(vectors, axis=-1, keepdims=True)
-
-def dot_product(array_a: np.ndarray, array_b: np.ndarray, keepdims: bool = True) -> np.ndarray:
-    """Compute dot product of two arrays."""
-    return np.sum(array_a * array_b, axis=-1, keepdims=keepdims)
-
-def project_vectors(array_a: np.ndarray, array_b: np.ndarray, keepdims: bool = True) -> np.ndarray:
-    """Project array_a onto array_b."""
-    a_dot_b = dot_product(array_a, array_b, keepdims=keepdims)
-    b_dot_b = dot_product(array_b, array_b, keepdims=keepdims)
-    return a_dot_b / b_dot_b
 
 def get_basis_vectors(residues: list, ca_coords: np.ndarray) -> np.ndarray:
     """
@@ -149,7 +188,7 @@ def calculate_torsional_angles(residues: list) -> np.ndarray:
         ))
     return np.array(torsional_angles)
 
-def calculate_features(structure: Structure, chain_id: str, neighbor_count: int) -> tuple:
+def calculate_features(structure: Structure.Structure, chain_id: str, neighbor_count: int) -> tuple:
     """
     Calculate structural features for a given chain.
 
@@ -159,7 +198,7 @@ def calculate_features(structure: Structure, chain_id: str, neighbor_count: int)
         neighbor_count (int): Number of neighbors to consider.
 
     Returns:
-        tuple: Translations, rotations, and torsional angles.
+        tuple: Residue labels, translations, rotations, and torsional angles.
     """
     residues = [residue for chain in structure[0] if chain.id == chain_id
                 for residue in chain if Polypeptide.is_aa(residue, standard=True)]
@@ -172,62 +211,33 @@ def calculate_features(structure: Structure, chain_id: str, neighbor_count: int)
     translations = calculate_translations(ca_coords, basis_vectors, neighbor_indices)
     rotations = calculate_rotations(basis_vectors, neighbor_indices)
     torsional_angles = calculate_torsional_angles(residues)
-
-    return translations, rotations, torsional_angles
-
-def featurize(pdb_file: str, chain_id: str, neighbor_count: int) -> tuple:
-    """
-    Featurize a protein chain from a PDB file.
-
-    Args:
-        pdb_file (str): Path to the PDB file.
-        chain_id (str): Chain identifier.
-        neighbor_count (int): Number of neighbors to consider.
-
-    Returns:
-        tuple: Residue labels, translations, rotations, and torsional angles.
-    """
-    structure = load_pdb(pdb_file)
-    translations, rotations, torsional_angles = calculate_features(structure, chain_id, neighbor_count)
     residue_labels = get_residue_labels(structure, chain_id)
+
     return residue_labels, translations, rotations, torsional_angles
 
-def save_features(features: tuple, output_dir: str, filename: str = 'features'):
-    """
-    Save calculated features to a file.
+# Main processing functions
+def featurize_directory(pdb_directory: str, protein_info: list, neighbor_count: int, output_dir: str):
+    chain_list = []
 
-    Args:
-        features (tuple): Residue labels, translations, rotations, and torsional angles.
-        output_dir (str): Directory to save the features.
-        filename (str): Name of the output file (default: 'features').
-    """
-    residue_labels, translations, rotations, torsional_angles = features
-    output_file = os.path.join(output_dir, filename)
-    np.savez(output_file,
-             residue_labels=residue_labels,
-             translations=translations,
-             rotations=rotations,
-             torsional_angles=torsional_angles)
+    for protein, filename, chain_id in protein_info:
+        pdb_file = os.path.join(pdb_directory, filename)
+        try:
+            structure = load_pdb(pdb_file)
+            features = calculate_features(structure, chain_id, neighbor_count)
+            save_features(features, output_dir, f"{protein}{chain_id}")
+            chain_list.append((protein, chain_id))
+            print(f"Features saved for {protein} (Chain {chain_id})")
+        except Exception as e:
+            print(f"Error processing {pdb_file}: {str(e)}")
 
-def parse_arguments():
-    """
-    Parse command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed arguments.
-    """
-    parser = argparse.ArgumentParser(description="Featurize protein structures from PDB files.")
-    parser.add_argument("pdb_file", type=str, help="Path to the PDB file")
-    parser.add_argument("chain_id", type=str, help="Chain identifier")
-    parser.add_argument("--neighbors", type=int, default=16, help="Number of neighbors to consider")
-    parser.add_argument("--output", type=str, default=".", help="Output directory")
-    return parser.parse_args()
+    save_chain_list(chain_list, output_dir)
 
 def main():
     args = parse_arguments()
-    features = featurize(args.pdb_file, args.chain_id, args.neighbors)
-    save_features(features, args.output, f"{os.path.basename(args.pdb_file)}_{args.chain_id}_features")
-    print("Features saved successfully.")
+    os.makedirs(args.output, exist_ok=True)
+    protein_info = read_protein_csv(args.csv_file)
+    featurize_directory(args.pdb_directory, protein_info, args.neighbors, args.output)
+    print("All features and chain list saved successfully.")
 
 if __name__ == "__main__":
     main()
