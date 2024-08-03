@@ -10,14 +10,15 @@ from scipy.spatial.transform import Rotation
 # Constants
 DEFAULT_NEIGHBOR_COUNT = 16
 DEFAULT_OUTPUT_DIR = "."
-CHAIN_LIST_FILENAME = 'chain_list.txt'
+CHAIN_LIST_FILENAME = 'chain_list.csv'
 
 # File handling functions
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Featurize protein structures from PDB files listed in a CSV.")
-    parser.add_argument("csv_file", type=str, help="Path to the CSV file containing protein information")
+    parser = argparse.ArgumentParser(description="Featurize protein structures from PDB files.")
     parser.add_argument("pdb_directory", type=str, help="Path to the directory containing PDB files")
     parser.add_argument("--neighbors", type=int, default=DEFAULT_NEIGHBOR_COUNT, help="Number of neighbors to consider")
+    parser.add_argument("--chainlist", type=str, default="default",
+                        help="Chain list mode: 'default', 'everything', or path to an existing CSV file")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_DIR, help="Output directory")
     return parser.parse_args()
 
@@ -29,15 +30,40 @@ def load_pdb(pdb_file: str) -> Structure.Structure:
     else:
         return parser.get_structure('protein', pdb_file)
 
-def read_protein_csv(csv_file: str) -> list:
+def read_chain_list_csv(csv_file: str) -> list:
     protein_info = []
     with open(csv_file, 'r') as f:
         csv_reader = csv.reader(f)
         next(csv_reader)  # Skip header
         for row in csv_reader:
-            protein, filename, chain = row
-            protein_info.append((protein, filename, chain))
+            protein, filename, model, chain = row
+            protein_info.append((protein, filename, int(model), chain))
     return protein_info
+
+def generate_chain_list(pdb_directory: str, mode: str) -> list:
+    chain_list = []
+    for filename in os.listdir(pdb_directory):
+        if filename.endswith(".pdb") or filename.endswith(".pdb.gz"):
+            pdb_file = os.path.join(pdb_directory, filename)
+            structure = load_pdb(pdb_file)
+            protein = os.path.splitext(filename)[0]
+            for model in structure:
+                if mode == "default":
+                    chain = next(iter(model))
+                    chain_list.append((protein, filename, model.id, chain.id))
+                    break
+                elif mode == "everything":
+                    for chain in model:
+                        chain_list.append((protein, filename, model.id, chain.id))
+    return chain_list
+
+def save_chain_list_csv(chain_list: list, output_dir: str):
+    output_file = os.path.join(output_dir, CHAIN_LIST_FILENAME)
+    with open(output_file, 'w', newline='') as f:
+        csv_writer = csv.writer(f)
+        csv_writer.writerow(["protein", "filename", "model", "chain"])
+        csv_writer.writerows(chain_list)
+    print(f"Chain list saved to {output_file}")
 
 def save_features(features: tuple, output_dir: str, filename: str):
     residue_labels, translations, rotations, torsional_angles = features
@@ -47,13 +73,6 @@ def save_features(features: tuple, output_dir: str, filename: str):
              translations=translations,
              rotations=rotations,
              torsional_angles=torsional_angles)
-
-def save_chain_list(chain_list: list, output_dir: str):
-    output_file = os.path.join(output_dir, CHAIN_LIST_FILENAME)
-    with open(output_file, 'w') as f:
-        for pdb_id, chain_id in chain_list:
-            f.write(f"{pdb_id}{chain_id}\n")
-    print(f"Chain list saved to {output_file}")
 
 # Utility functions
 def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
@@ -83,12 +102,11 @@ def get_residue_labels(structure: Structure.Structure, chain_id: str) -> np.ndar
         np.ndarray: Array of residue labels.
     """
     residue_labels = []
-    for model in structure:
-        for chain in model:
-            if chain.id == chain_id:
-                for residue in chain:
-                    if Polypeptide.is_aa(residue, standard=True):
-                        residue_labels.append(Polypeptide.three_to_index(residue.resname))
+    for chain in structure:
+        if chain.id == chain_id:
+            for residue in chain:
+                if Polypeptide.is_aa(residue, standard=True):
+                    residue_labels.append(Polypeptide.three_to_index(residue.resname))
     return np.array(residue_labels)
 
 def get_basis_vectors(residues: list, ca_coords: np.ndarray) -> np.ndarray:
@@ -188,19 +206,20 @@ def calculate_torsional_angles(residues: list) -> np.ndarray:
         ))
     return np.array(torsional_angles)
 
-def calculate_features(structure: Structure.Structure, chain_id: str, neighbor_count: int) -> tuple:
+def calculate_features(structure: Structure.Structure, model_id: int, chain_id: str, neighbor_count: int) -> tuple:
     """
-    Calculate structural features for a given chain.
+    Calculate structural features for a given model and chain.
 
     Args:
         structure (Structure.Structure): Parsed PDB structure.
+        model_id (int): Model identifier.
         chain_id (str): Chain identifier.
         neighbor_count (int): Number of neighbors to consider.
 
     Returns:
         tuple: Residue labels, translations, rotations, and torsional angles.
     """
-    residues = [residue for chain in structure[0] if chain.id == chain_id
+    residues = [residue for chain in structure[model_id] if chain.id == chain_id
                 for residue in chain if Polypeptide.is_aa(residue, standard=True)]
     ca_coords = np.array([residue['CA'].coord for residue in residues])
 
@@ -211,33 +230,34 @@ def calculate_features(structure: Structure.Structure, chain_id: str, neighbor_c
     translations = calculate_translations(ca_coords, basis_vectors, neighbor_indices)
     rotations = calculate_rotations(basis_vectors, neighbor_indices)
     torsional_angles = calculate_torsional_angles(residues)
-    residue_labels = get_residue_labels(structure, chain_id)
+    residue_labels = get_residue_labels(structure[model_id], chain_id)
 
     return residue_labels, translations, rotations, torsional_angles
 
 # Main processing functions
 def featurize_directory(pdb_directory: str, protein_info: list, neighbor_count: int, output_dir: str):
-    chain_list = []
-
-    for protein, filename, chain_id in protein_info:
+    for protein, filename, model_id, chain_id in protein_info:
         pdb_file = os.path.join(pdb_directory, filename)
         try:
             structure = load_pdb(pdb_file)
-            features = calculate_features(structure, chain_id, neighbor_count)
-            save_features(features, output_dir, f"{protein}{chain_id}")
-            chain_list.append((protein, chain_id))
-            print(f"Features saved for {protein} (Chain {chain_id})")
+            features = calculate_features(structure, model_id, chain_id, neighbor_count)
+            save_features(features, output_dir, f"{protein}_{model_id}_{chain_id}")
+            print(f"Features saved for {protein} (Model - {model_id}, Chain - {chain_id})")
         except Exception as e:
             print(f"Error processing {pdb_file}: {str(e)}")
-
-    save_chain_list(chain_list, output_dir)
 
 def main():
     args = parse_arguments()
     os.makedirs(args.output, exist_ok=True)
-    protein_info = read_protein_csv(args.csv_file)
-    featurize_directory(args.pdb_directory, protein_info, args.neighbors, args.output)
-    print("All features and chain list saved successfully.")
+
+    if args.chainlist in ["default", "everything"]:
+        chain_list = generate_chain_list(args.pdb_directory, args.chainlist)
+        save_chain_list_csv(chain_list, args.output)
+    else:
+        chain_list = read_chain_list_csv(args.chainlist)
+
+    featurize_directory(args.pdb_directory, chain_list, args.neighbors, args.output)
+    print("All features saved successfully.")
 
 if __name__ == "__main__":
     main()
