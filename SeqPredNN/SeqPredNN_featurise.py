@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation
 # Constants
 DEFAULT_NEIGHBOR_COUNT = 16
 DEFAULT_OUTPUT_DIR = "."
-CHAIN_LIST_FILENAME = 'chain_list.csv'
+CHAIN_LIST_TXT_FILENAME = 'chain_list.txt'
 
 # File handling functions
 def parse_arguments():
@@ -30,39 +30,32 @@ def load_pdb(pdb_file: str) -> Structure.Structure:
     else:
         return parser.get_structure('protein', pdb_file)
 
-def read_chain_list_csv(csv_file: str) -> list:
-    protein_info = []
-    with open(csv_file, 'r') as f:
+def get_chain_list(pdb_directory: str, chainlist_option: str) -> list:
+    if chainlist_option in ["default", "everything"]:
+        chain_list = []
+        for filename in os.listdir(pdb_directory):
+            if filename.endswith((".pdb", ".pdb.gz")):
+                pdb_file = os.path.join(pdb_directory, filename)
+                structure = load_pdb(pdb_file)
+                protein = os.path.splitext(filename)[0]
+                for model in structure:
+                    if chainlist_option == "default":
+                        chain = next(iter(model))
+                        chain_list.append((protein, filename, model.id, chain.id))
+                        break
+                    elif chainlist_option == "everything":
+                        chain_list.extend((protein, filename, model.id, chain.id) for chain in model)
+        return chain_list
+    with open(chainlist_option, 'r') as f:
         csv_reader = csv.reader(f)
         next(csv_reader)  # Skip header
-        for row in csv_reader:
-            protein, filename, model, chain = row
-            protein_info.append((protein, filename, int(model), chain))
-    return protein_info
+        return [(row[0], row[1], int(row[2]), row[3]) for row in csv_reader]
 
-def generate_chain_list(pdb_directory: str, mode: str) -> list:
-    chain_list = []
-    for filename in os.listdir(pdb_directory):
-        if filename.endswith(".pdb") or filename.endswith(".pdb.gz"):
-            pdb_file = os.path.join(pdb_directory, filename)
-            structure = load_pdb(pdb_file)
-            protein = os.path.splitext(filename)[0]
-            for model in structure:
-                if mode == "default":
-                    chain = next(iter(model))
-                    chain_list.append((protein, filename, model.id, chain.id))
-                    break
-                elif mode == "everything":
-                    for chain in model:
-                        chain_list.append((protein, filename, model.id, chain.id))
-    return chain_list
-
-def save_chain_list_csv(chain_list: list, output_dir: str):
-    output_file = os.path.join(output_dir, CHAIN_LIST_FILENAME)
-    with open(output_file, 'w', newline='') as f:
-        csv_writer = csv.writer(f)
-        csv_writer.writerow(["protein", "filename", "model", "chain"])
-        csv_writer.writerows(chain_list)
+def save_chain_list(chain_list: list, output_dir: str):
+    output_file = os.path.join(output_dir, CHAIN_LIST_TXT_FILENAME)
+    with open(output_file, 'w') as f:
+        for protein in chain_list:
+            f.write(f"{protein}\n")
     print(f"Chain list saved to {output_file}")
 
 def save_features(features: tuple, output_dir: str, filename: str):
@@ -235,28 +228,25 @@ def calculate_features(structure: Structure.Structure, model_id: int, chain_id: 
     return residue_labels, translations, rotations, torsional_angles
 
 # Main processing functions
-def featurize_directory(pdb_directory: str, protein_info: list, neighbor_count: int, output_dir: str):
-    for protein, filename, model_id, chain_id in protein_info:
+def featurize_proteins(pdb_directory: str, chain_list: list, neighbor_count: int, output_dir: str):
+    successful_proteins = []
+    for protein, filename, model_id, chain_id in chain_list:
         pdb_file = os.path.join(pdb_directory, filename)
         try:
             structure = load_pdb(pdb_file)
             features = calculate_features(structure, model_id, chain_id, neighbor_count)
             save_features(features, output_dir, f"{protein}_{model_id}_{chain_id}")
+            successful_proteins.append(f"{protein}_{model_id}_{chain_id}")
             print(f"Features saved for {protein} (Model - {model_id}, Chain - {chain_id})")
         except Exception as e:
             print(f"Error processing {pdb_file}: {str(e)}")
+    save_chain_list(successful_proteins, output_dir)
 
 def main():
     args = parse_arguments()
     os.makedirs(args.output, exist_ok=True)
-
-    if args.chainlist in ["default", "everything"]:
-        chain_list = generate_chain_list(args.pdb_directory, args.chainlist)
-        save_chain_list_csv(chain_list, args.output)
-    else:
-        chain_list = read_chain_list_csv(args.chainlist)
-
-    featurize_directory(args.pdb_directory, chain_list, args.neighbors, args.output)
+    chain_list = get_chain_list(args.pdb_directory, args.chainlist)
+    featurize_proteins(args.pdb_directory, chain_list, args.neighbors, args.output)
     print("All features saved successfully.")
 
 if __name__ == "__main__":
